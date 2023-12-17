@@ -120,6 +120,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer transact.Close()
 
 	r := mux.NewRouter()
 

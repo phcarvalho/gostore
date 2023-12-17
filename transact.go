@@ -53,7 +53,6 @@ func (l *TransactionLogger) Run() {
 	l.errors = errors
 
 	go func() {
-		defer l.Close()
 		for e := range events {
 			l.lastSequence++
 
