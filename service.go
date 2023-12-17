@@ -2,12 +2,26 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 )
+
+var transact *TransactionLogger
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println(r.Method, r.RequestURI)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func notAllowedHandler(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "Not Allowed", http.StatusMethodNotAllowed)
+}
 
 func keyValuePutHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -27,7 +41,11 @@ func keyValuePutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	transact.WritePut(key, string(value))
+
 	w.WriteHeader(http.StatusCreated)
+
+	log.Printf("PUT key=\"%s\" value=\"%s\"\n", key, string(value))
 }
 
 func keyValueGetHandler(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +65,8 @@ func keyValueGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write([]byte(value))
+
+	log.Printf("GET key=\"%s\"\n", key)
 }
 
 func keyValueDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -59,15 +79,58 @@ func keyValueDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	transact.WriteDelete(key)
+
 	w.WriteHeader(http.StatusOK)
+
+	log.Printf("DELETE key=\"%s\"\n", key)
+}
+
+func initializeTransactionLog() error {
+	var err error
+
+	transact, err = NewTransactionLogger("transaction.log")
+	if err != nil {
+		return fmt.Errorf("failed to create event logger: %w", err)
+	}
+
+	events, errors := transact.ReadEvents()
+	e, ok := Event{}, true
+
+	for ok && err == nil {
+		select {
+		case err, ok = <-errors:
+		case e, ok = <- events:
+			switch e.EventType {
+			case EventDelete:
+				err = Delete(e.Key)
+			case EventPut:
+				err = Put(e.Key, e.Value)
+			}
+		}
+	}
+
+	transact.Run()
+
+	return err
 }
 
 func main() {
+	err := initializeTransactionLog()
+	if err != nil {
+		panic(err)
+	}
+
 	r := mux.NewRouter()
 
-	r.HandleFunc("/v1/{key}", keyValueGetHandler).Methods(http.MethodGet)
-	r.HandleFunc("/v1/{key}", keyValuePutHandler).Methods(http.MethodPut)
-	r.HandleFunc("/v1/{key}", keyValueDeleteHandler).Methods(http.MethodDelete)
+	r.Use(loggingMiddleware)
+
+	r.HandleFunc("/v1/keys/{key}", keyValueGetHandler).Methods(http.MethodGet)
+	r.HandleFunc("/v1/keys/{key}", keyValuePutHandler).Methods(http.MethodPut)
+	r.HandleFunc("/v1/keys/{key}", keyValueDeleteHandler).Methods(http.MethodDelete)
+
+	r.HandleFunc("/v1", notAllowedHandler)
+	r.HandleFunc("/v1/keys/{key}", notAllowedHandler)
 
 	log.Fatal(http.ListenAndServe(":4000", r))
 }
